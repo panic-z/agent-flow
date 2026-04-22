@@ -1,0 +1,15 @@
+{
+  "name": "agent-flow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal multi-agent orchestrator demo using Codex CLI sub-agents",
+  "type": "module",
+  "dependencies": {
+    "@openai/codex-sdk": "^0.122.0",
+    "openai": "^5.20.2"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test"
+  }
+}
