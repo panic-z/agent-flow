@@ -28,7 +28,7 @@ export class CodexRunner {
   constructor({
     codexClient,
     cwd = process.cwd(),
-    timeoutMs = 60_000,
+    timeoutMs = 900_000,
     model = "gpt-5.4",
   } = {}) {
     this.cwd = cwd;

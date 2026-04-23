@@ -55,6 +55,7 @@ npm test
 - Default mode requires a working `codex` CLI and uses `@openai/codex-sdk`
 - OpenAI mode requires `AGENT_FLOW_RUNNER=openai` and `OPENAI_API_KEY`
 - OpenAI mode uses `gpt-5.2` by default; override with `OPENAI_MODEL`
+- Default main-agent and runner timeout is 15 minutes
 - Codex timeout can be overridden with `AGENT_FLOW_CODEX_TIMEOUT_MS`
 - OpenAI timeout can be overridden with `AGENT_FLOW_OPENAI_TIMEOUT_MS`
 - Fake mode is intended for deterministic tests and local demos

@@ -46,7 +46,7 @@ export class OpenAIRunner {
     apiKey = process.env.OPENAI_API_KEY,
     cwd = process.cwd(),
     model = "gpt-5.2",
-    timeoutMs = 60_000,
+    timeoutMs = 900_000,
   } = {}) {
     this.client = client ?? new OpenAI({ apiKey });
     this.cwd = cwd;

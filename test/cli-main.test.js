@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { assertCodexAvailable, assertOpenAIConfig, createRunnerFromEnv, main } from "../src/cli.js";
+import { assertCodexAvailable, assertOpenAIConfig, createMainAgentFromEnv, createRunnerFromEnv, main } from "../src/cli.js";
 import { CodexRunner } from "../src/runners/codex-runner.js";
 import { FakeRunner } from "../src/runners/fake-runner.js";
 import { OpenAIRunner } from "../src/runners/openai-runner.js";
@@ -26,6 +26,17 @@ test("createRunnerFromEnv uses the codex runner by default", async () => {
   assert.equal(runner.timeoutMs, 1500);
 });
 
+test("createRunnerFromEnv defaults timeout to 15 minutes", async () => {
+  const runner = await createRunnerFromEnv({
+    env: {
+      AGENT_FLOW_RUNNER: "codex",
+    },
+  });
+
+  assert.ok(runner instanceof CodexRunner);
+  assert.equal(runner.timeoutMs, 900_000);
+});
+
 test("createRunnerFromEnv passes timeout configuration to OpenAIRunner", async () => {
   const runner = await createRunnerFromEnv({
     env: {
@@ -37,6 +48,14 @@ test("createRunnerFromEnv passes timeout configuration to OpenAIRunner", async (
 
   assert.ok(runner instanceof OpenAIRunner);
   assert.equal(runner.timeoutMs, 1500);
+});
+
+test("createMainAgentFromEnv defaults timeout to 15 minutes", async () => {
+  const agent = await createMainAgentFromEnv({
+    env: {},
+  });
+
+  assert.equal(agent.timeoutMs, 900_000);
 });
 
 test("assertOpenAIConfig throws when OPENAI_API_KEY is missing", () => {

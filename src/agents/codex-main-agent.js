@@ -127,7 +127,7 @@ export class CodexMainAgent {
     codexClient,
     cwd = process.cwd(),
     model = "gpt-5.4",
-    timeoutMs = 60_000,
+    timeoutMs = 900_000,
   } = {}) {
     this.cwd = cwd;
     this.model = model;

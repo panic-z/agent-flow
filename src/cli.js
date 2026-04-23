@@ -10,6 +10,7 @@ import { FakeRunner } from "./runners/fake-runner.js";
 import { OpenAIRunner } from "./runners/openai-runner.js";
 
 const execFile = promisify(execFileCallback);
+const DEFAULT_TIMEOUT_MS = 900_000;
 
 export async function createRunnerFromEnv({
   env = process.env,
@@ -143,7 +144,7 @@ export async function assertCodexAvailable() {
 
 function parseTimeoutMs(value) {
   const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TIMEOUT_MS;
 }
 
 function isInterruptError(error) {
