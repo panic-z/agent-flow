@@ -119,3 +119,147 @@ test("main shuts down the main agent and runner on SIGINT", async () => {
   assert.equal(mainAgentShutdowns, 1);
   assert.equal(runnerShutdowns, 1);
 });
+
+test("main keeps interactive mode open for follow-up rounds and exits on blank input", async () => {
+  const prompts = [];
+  const writes = [];
+  const runCalls = [];
+
+  const exitCode = await main({
+    argv: [],
+    stdin: process.stdin,
+    stdout: { write(chunk) { writes.push(chunk); } },
+    stderrStream: { write() {} },
+    processSignals: {
+      once() {},
+      off() {},
+    },
+    createReadline() {
+      return {
+        async question(promptText) {
+          prompts.push(promptText);
+          if (promptText === "Enter todo list: ") {
+            return "research harness frameworks";
+          }
+          if (/Continue with a follow-up/.test(promptText)) {
+            return "";
+          }
+          throw new Error(`Unexpected prompt: ${promptText}`);
+        },
+        close() {},
+      };
+    },
+    runAppImpl: async (options) => {
+      runCalls.push({
+        args: options.args,
+        sessionContext: options.sessionContext,
+      });
+      return {
+        exitCode: 0,
+        tasks: [
+          {
+            id: 1,
+            title: "Research harness frameworks",
+            status: "success",
+            resultSummary: "saved shortlist",
+          },
+        ],
+        sessionContext: {
+          originalRequest: "research harness frameworks",
+          latestRoundTasks: [
+            {
+              id: 1,
+              title: "Research harness frameworks",
+              status: "success",
+              resultSummary: "saved shortlist",
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(runCalls.length, 1);
+  assert.deepEqual(runCalls[0].args, ["research harness frameworks"]);
+  assert.equal(runCalls[0].sessionContext, undefined);
+  assert.ok(prompts.some((prompt) => /Continue with a follow-up/.test(prompt)));
+  assert.match(writes.join(""), /inherit the current session context/i);
+});
+
+test("main passes session context into the next interactive round", async () => {
+  const runCalls = [];
+  let continuePromptCount = 0;
+
+  const exitCode = await main({
+    argv: [],
+    stdin: process.stdin,
+    stdout: { write() {} },
+    stderrStream: { write() {} },
+    processSignals: {
+      once() {},
+      off() {},
+    },
+    createReadline() {
+      return {
+        async question(promptText) {
+          if (promptText === "Enter todo list: ") {
+            return "research harness frameworks";
+          }
+          if (/Continue with a follow-up/.test(promptText)) {
+            continuePromptCount += 1;
+            return continuePromptCount === 1 ? "compare the failed ones" : "exit";
+          }
+          throw new Error(`Unexpected prompt: ${promptText}`);
+        },
+        close() {},
+      };
+    },
+    runAppImpl: async (options) => {
+      runCalls.push({
+        args: options.args,
+        sessionContext: options.sessionContext,
+      });
+      const inputText = options.args.join(" ");
+      return {
+        exitCode: inputText.includes("compare")
+          ? 1
+          : 0,
+        tasks: [
+          {
+            id: 1,
+            title: inputText,
+            status: inputText.includes("compare") ? "failed" : "success",
+            resultSummary: inputText.includes("compare") ? "comparison failed" : "saved shortlist",
+          },
+        ],
+        sessionContext: {
+          originalRequest: "research harness frameworks",
+          latestRoundTasks: [
+            {
+              id: 1,
+              title: inputText,
+              status: inputText.includes("compare") ? "failed" : "success",
+              resultSummary: inputText.includes("compare") ? "comparison failed" : "saved shortlist",
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(runCalls.length, 2);
+  assert.deepEqual(runCalls[1].args, ["compare the failed ones"]);
+  assert.deepEqual(runCalls[1].sessionContext, {
+    originalRequest: "research harness frameworks",
+    latestRoundTasks: [
+      {
+        id: 1,
+        title: "research harness frameworks",
+        status: "success",
+        resultSummary: "saved shortlist",
+      },
+    ],
+  });
+});

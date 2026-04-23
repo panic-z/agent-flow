@@ -7,6 +7,7 @@ export async function runApp({
   write,
   createMainAgent,
   createRunner,
+  sessionContext,
   cwd = process.cwd(),
   maxConcurrency = 5,
   heartbeatMs = 15_000,
@@ -14,6 +15,7 @@ export async function runApp({
   clearInterval = globalThis.clearInterval,
 }) {
   const initialText = args.length > 0 ? args.join(" ") : await prompt("Enter todo list: ");
+  const analysisInput = buildAnalysisInput(initialText, sessionContext);
   const statePaths = getExecutionPaths(cwd);
   const resumedState = await loadResumableState(statePaths.progressPath, initialText);
 
@@ -34,14 +36,21 @@ export async function runApp({
     } else {
       write(`${formatStage("Stage 1/4: analyzing your todo list.")}\n`);
       mainAgent = await createMainAgent();
-      const analysis = await mainAgent.analyzeTodo(initialText);
+      const analysis = await mainAgent.analyzeTodo(analysisInput);
       if (analysis.tasks.length === 0 && !analysis.needsClarification) {
         write(`${formatWarning("No tasks provided.")}\n`);
         return { exitCode: 1, tasks: [] };
       }
 
-      confirmedTasks = await confirmTasks({ analysis, prompt, write, mainAgent });
-      summaryText = analysis.summary;
+      const confirmation = await confirmTasks({
+        analysis,
+        prompt,
+        write,
+        mainAgent,
+        sessionContext,
+      });
+      confirmedTasks = confirmation.tasks;
+      summaryText = confirmation.summary;
       originalInput = initialText;
       startedAt = new Date().toISOString();
       await saveExecutionPlan({
@@ -99,14 +108,22 @@ export async function runApp({
     }
     write(`${formatTotals(summary.successCount, summary.failureCount)}\n`);
 
-    return { exitCode: summary.failureCount > 0 ? 1 : 0, tasks: summary.tasks };
+    return {
+      exitCode: summary.failureCount > 0 ? 1 : 0,
+      tasks: summary.tasks,
+      sessionContext: buildSessionContext({
+        initialText,
+        sessionContext,
+        tasks: summary.tasks,
+      }),
+    };
   } finally {
     mainAgent?.shutdown?.();
     runner?.shutdown?.();
   }
 }
 
-async function confirmTasks({ analysis, prompt, write, mainAgent }) {
+async function confirmTasks({ analysis, prompt, write, mainAgent, sessionContext }) {
   let currentAnalysis = analysis;
 
   while (true) {
@@ -114,7 +131,7 @@ async function confirmTasks({ analysis, prompt, write, mainAgent }) {
     if (currentAnalysis.needsClarification) {
       write(`${formatWarning(currentAnalysis.clarificationPrompt)}\n`);
       const replacement = await prompt(`${formatPrompt("Please update the todo list with the clarification above: ")}`);
-      currentAnalysis = await mainAgent.analyzeTodo(replacement);
+      currentAnalysis = await mainAgent.analyzeTodo(buildAnalysisInput(replacement, sessionContext));
       if (currentAnalysis.tasks.length === 0) {
         write(`${formatWarning("No tasks detected, please try again.")}\n`);
       }
@@ -126,6 +143,7 @@ async function confirmTasks({ analysis, prompt, write, mainAgent }) {
     for (const task of currentAnalysis.tasks) {
       write(`${task.id}. ${task.title}\n`);
     }
+    write(`${formatInfo('You can accept this plan, or reply with edits like "split task 2", "change the order", or "remove the save step".')}\n`);
     const executionWaves = buildExecutionWaves(currentAnalysis.tasks);
     if (executionWaves.length > 0) {
       write(`${formatHeader("Parallel execution plan:")}\n`);
@@ -137,17 +155,115 @@ async function confirmTasks({ analysis, prompt, write, mainAgent }) {
       }
     }
 
-    const answer = (await prompt(`${formatPrompt("Confirm tasks? (yes/no) [default: yes]: ")}`)).trim().toLowerCase();
-    if (answer === "" || answer === "yes" || answer === "y") {
-      return currentAnalysis.tasks;
+    const answer = (await prompt(`${formatPrompt("Press Enter to accept, type yes to continue, or describe what to change: ")}`)).trim();
+    const normalizedAnswer = answer.toLowerCase();
+    if (normalizedAnswer === "" || normalizedAnswer === "yes" || normalizedAnswer === "y") {
+      return {
+        tasks: currentAnalysis.tasks,
+        summary: currentAnalysis.summary,
+      };
     }
 
-    const replacement = await prompt(`${formatPrompt("Re-enter full todo list: ")}`);
-    currentAnalysis = await mainAgent.analyzeTodo(replacement);
+    const feedback = normalizedAnswer === "no"
+      ? await prompt(`${formatPrompt("Tell me how you want to adjust this plan: ")}`)
+      : answer;
+
+    currentAnalysis = await mainAgent.analyzeTodo(buildPlanRevisionInput({
+      originalInput: currentAnalysis,
+      userFeedback: feedback,
+      sessionContext,
+    }));
     if (currentAnalysis.tasks.length === 0) {
       write(`${formatWarning("No tasks detected, please try again.")}\n`);
     }
   }
+}
+
+function buildPlanRevisionInput({ originalInput, userFeedback, sessionContext }) {
+  const currentPlan = originalInput.tasks
+    .map((task) => {
+      const dependsOn = Array.isArray(task.dependsOn) && task.dependsOn.length > 0
+        ? task.dependsOn.join(", ")
+        : "(none)";
+      return `- ${task.id}. ${task.title} [dependsOn: ${dependsOn}]`;
+    })
+    .join("\n");
+
+  const baseSections = [
+    "Original user request:",
+    sessionContext?.originalRequest || "(not available)",
+    "",
+    "Current proposed plan:",
+    currentPlan,
+    "",
+    "User feedback on the current plan:",
+    userFeedback,
+    "",
+    "Revise the current plan based on the feedback above.",
+    "Return a new flat task plan in the same structured format as before.",
+  ];
+
+  if (!sessionContext?.originalRequest || !Array.isArray(sessionContext.latestRoundTasks) || sessionContext.latestRoundTasks.length === 0) {
+    return baseSections.join("\n");
+  }
+
+  return [
+    "Session original request:",
+    sessionContext.originalRequest,
+    "",
+    "Previous round results:",
+    sessionContext.latestRoundTasks
+      .map((task) => {
+        const status = typeof task.status === "string" ? task.status : "unknown";
+        const title = task.title || `Task ${task.id ?? ""}`.trim();
+        const summary = task.resultSummary || "(no result summary)";
+        return `- [${status}] ${title}: ${summary}`;
+      })
+      .join("\n"),
+    "",
+    ...baseSections,
+  ].join("\n");
+}
+
+function buildAnalysisInput(initialText, sessionContext) {
+  if (!sessionContext?.originalRequest || !Array.isArray(sessionContext.latestRoundTasks) || sessionContext.latestRoundTasks.length === 0) {
+    return initialText;
+  }
+
+  const previousRoundResults = sessionContext.latestRoundTasks
+    .map((task) => {
+      const status = typeof task.status === "string" ? task.status : "unknown";
+      const title = task.title || `Task ${task.id ?? ""}`.trim();
+      const summary = task.resultSummary || "(no result summary)";
+      return `- [${status}] ${title}: ${summary}`;
+    })
+    .join("\n");
+
+  return [
+    "Session original request:",
+    sessionContext.originalRequest,
+    "",
+    "Previous round results:",
+    previousRoundResults,
+    "",
+    "New user follow-up:",
+    initialText,
+    "",
+    "Based on the full session context above, produce a new flat task plan for this follow-up only.",
+  ].join("\n");
+}
+
+function buildSessionContext({ initialText, sessionContext, tasks }) {
+  const originalRequest = sessionContext?.originalRequest || initialText;
+  return {
+    originalRequest,
+    latestRoundTasks: tasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      resultSummary: task.resultSummary,
+    })),
+  };
 }
 
 async function runTaskLoop({

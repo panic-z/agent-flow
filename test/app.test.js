@@ -59,21 +59,195 @@ test("runApp uses interactive input when no args are provided", async () => {
   assert.match(normalizeOutput(output), /2\. Draft update/);
 });
 
-test("runApp allows user to reject normalized tasks and re-enter the full list", async () => {
-  const answers = ["bad task", "no", "first; second", "yes"];
+test("runApp includes session context when analyzing a follow-up round", async () => {
+  const answers = ["yes"];
+  const seenInputs = [];
+
+  const result = await runApp({
+    args: ["compare the failed items and propose a retry plan"],
+    prompt: async () => answers.shift(),
+    write: () => {},
+    sessionContext: {
+      originalRequest: "research three frameworks and save summaries",
+      latestRoundTasks: [
+        {
+          id: 1,
+          title: "Research framework A",
+          status: "success",
+          resultSummary: "Framework A summary saved",
+        },
+        {
+          id: 2,
+          title: "Research framework B",
+          status: "failed",
+          resultSummary: "Framework B site timed out",
+        },
+      ],
+    },
+    createMainAgent: async () => ({
+      async analyzeTodo(input) {
+        seenInputs.push(input);
+        return {
+          summary: "I interpreted your request as 1 task.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "Compare the failed items and propose a retry plan",
+              details: "Compare the failed items and propose a retry plan",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        };
+      },
+    }),
+    createRunner: async () =>
+      new FakeRunner([
+        { status: "success", summary: "retry plan drafted", artifacts: [], rawOutput: "" },
+      ]),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(seenInputs.length, 1);
+  assert.match(seenInputs[0], /Session original request:\nresearch three frameworks and save summaries/);
+  assert.match(seenInputs[0], /Previous round results:/);
+  assert.match(seenInputs[0], /- \[success\] Research framework A: Framework A summary saved/);
+  assert.match(seenInputs[0], /- \[failed\] Research framework B: Framework B site timed out/);
+  assert.match(seenInputs[0], /New user follow-up:\ncompare the failed items and propose a retry plan/);
+});
+
+test("runApp lets the user revise the proposed plan with direct feedback", async () => {
+  const answers = ["bad task", "split it into first and second tasks", "yes"];
   const output = [];
+  const seenInputs = [];
 
   const result = await runApp({
     args: [],
     prompt: async () => answers.shift(),
     write: (chunk) => output.push(chunk),
-    createMainAgent: async () => createFakeMainAgent(),
+    createMainAgent: async () => ({
+      async analyzeTodo(input) {
+        seenInputs.push(input);
+        if (seenInputs.length === 1) {
+          return analyzeTodoText("bad task");
+        }
+        return {
+          summary: "I revised the plan into 2 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "First",
+              details: "First",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 2,
+              title: "Second",
+              details: "Second",
+              dependsOn: [1],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        };
+      },
+    }),
     createRunner: async () => new FakeRunner(),
   });
 
   assert.equal(result.exitCode, 0);
+  assert.match(normalizeOutput(output), /You can accept this plan, or reply with edits like "split task 2", "change the order", or "remove the save step"\./);
   assert.match(normalizeOutput(output), /1\. First/);
   assert.match(normalizeOutput(output), /2\. Second/);
+  assert.match(seenInputs[1], /Current proposed plan:/);
+  assert.match(seenInputs[1], /User feedback on the current plan:\nsplit it into first and second tasks/);
+});
+
+test("runApp prompts for plan feedback after the user types no at confirmation", async () => {
+  const answers = ["bad task", "no", "change the order and add a save step", "yes"];
+  const seenInputs = [];
+
+  await runApp({
+    args: [],
+    prompt: async () => answers.shift(),
+    write: () => {},
+    createMainAgent: async () => ({
+      async analyzeTodo(input) {
+        seenInputs.push(input);
+        if (seenInputs.length === 1) {
+          return analyzeTodoText("bad task");
+        }
+        return {
+          summary: "I revised the plan into 2 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "Do work",
+              details: "Do work",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 2,
+              title: "Save results",
+              details: "Save results",
+              dependsOn: [1],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        };
+      },
+    }),
+    createRunner: async () => new FakeRunner(),
+  });
+
+  assert.match(seenInputs[1], /User feedback on the current plan:\nchange the order and add a save step/);
+});
+
+test("runApp uses a plan-editing confirmation prompt", async () => {
+  const answers = ["buy milk; draft update", "yes"];
+  const seenPrompts = [];
+
+  await runApp({
+    args: [],
+    prompt: async (question) => {
+      seenPrompts.push(question.replace(/\x1b\[[0-9;]*m/g, ""));
+      return answers.shift();
+    },
+    write: () => {},
+    createMainAgent: async () => createFakeMainAgent(),
+    createRunner: async () => new FakeRunner(),
+  });
+
+  assert.ok(
+    seenPrompts.includes("Press Enter to accept, type yes to continue, or describe what to change: "),
+  );
 });
 
 test("runApp treats an empty confirmation answer as yes", async () => {

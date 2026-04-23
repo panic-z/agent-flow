@@ -75,21 +75,59 @@ export async function main({
   processSignals.once?.("SIGTERM", handleInterrupt);
 
   try {
-    const result = await runAppImpl({
-      args: argv,
-      prompt: (question) => rl.question(question),
-      write: (chunk) => stdout.write(chunk),
-      createMainAgent: async () => {
-        currentMainAgent = await createMainAgent();
-        return currentMainAgent;
-      },
-      createRunner: async () => {
-        currentRunner = await createRunner();
-        return currentRunner;
-      },
-      cwd,
-    });
-    return result.exitCode;
+    const prompt = (question) => rl.question(question);
+    const write = (chunk) => stdout.write(chunk);
+    const createMainAgentWithTracking = async () => {
+      currentMainAgent = await createMainAgent();
+      return currentMainAgent;
+    };
+    const createRunnerWithTracking = async () => {
+      currentRunner = await createRunner();
+      return currentRunner;
+    };
+
+    if (argv.length > 0) {
+      const result = await runAppImpl({
+        args: argv,
+        prompt,
+        write,
+        createMainAgent: createMainAgentWithTracking,
+        createRunner: createRunnerWithTracking,
+        cwd,
+      });
+      return result.exitCode;
+    }
+
+    let exitCode = 0;
+    let nextArgs = [(await prompt("Enter todo list: ")).trim()];
+    let sessionContext;
+
+    while (!interrupted) {
+      if (nextArgs[0] === "") {
+        break;
+      }
+
+      const result = await runAppImpl({
+        args: nextArgs,
+        prompt,
+        write,
+        createMainAgent: createMainAgentWithTracking,
+        createRunner: createRunnerWithTracking,
+        sessionContext,
+        cwd,
+      });
+      exitCode = result.exitCode;
+      sessionContext = result.sessionContext ?? sessionContext;
+
+      write("\nYou can continue with a follow-up that will inherit the current session context.\n");
+      const followUp = (await prompt("Continue with a follow-up (press Enter to exit, or type exit/quit): ")).trim();
+      if (followUp === "" || followUp.toLowerCase() === "exit" || followUp.toLowerCase() === "quit") {
+        break;
+      }
+      nextArgs = [followUp];
+    }
+
+    return interrupted ? 130 : exitCode;
   } catch (error) {
     if (interrupted || isInterruptError(error)) {
       return 130;
