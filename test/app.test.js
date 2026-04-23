@@ -119,6 +119,134 @@ test("runApp analyzes numbered lists before confirmation", async () => {
   assert.match(normalizeOutput(output), /2\. 画出他们的架构图并保存在本地/);
 });
 
+test("runApp tells the user which tasks can run in parallel", async () => {
+  const answers = ["yes"];
+  const output = [];
+
+  const result = await runApp({
+    args: ["research frameworks; analyze framework A; analyze framework B; save results"],
+    prompt: async () => answers.shift(),
+    write: (chunk) => output.push(chunk),
+    createMainAgent: async () =>
+      createFakeMainAgent({
+        "research frameworks; analyze framework A; analyze framework B; save results": {
+          summary: "I interpreted your request as 4 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "Research frameworks",
+              details: "Research frameworks",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 2,
+              title: "Analyze framework A",
+              details: "Analyze framework A",
+              dependsOn: [1],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 3,
+              title: "Analyze framework B",
+              details: "Analyze framework B",
+              dependsOn: [1],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 4,
+              title: "Save results",
+              details: "Save results",
+              dependsOn: [2, 3],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        },
+      }),
+    createRunner: async () =>
+      new FakeRunner([
+        { status: "success", summary: "done 1", artifacts: [], rawOutput: "" },
+        { status: "success", summary: "done 2", artifacts: [], rawOutput: "" },
+        { status: "success", summary: "done 3", artifacts: [], rawOutput: "" },
+        { status: "success", summary: "done 4", artifacts: [], rawOutput: "" },
+      ]),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.match(normalizeOutput(output), /Parallel execution plan:/);
+  assert.match(
+    normalizeOutput(output),
+    /Tasks in the same wave will run in parallel\. Later waves will wait for their dependencies\./,
+  );
+  assert.match(normalizeOutput(output), /Wave 1: 1\. Research frameworks/);
+  assert.match(normalizeOutput(output), /Wave 2 \(parallel\): 2\. Analyze framework A \| 3\. Analyze framework B/);
+  assert.match(normalizeOutput(output), /Wave 3: 4\. Save results/);
+});
+
+test("runApp shows an explicit shortlist task and per-entity parallel waves for finer plans", async () => {
+  const answers = ["yes"];
+  const output = [];
+
+  const result = await runApp({
+    args: ["调研热门框架并为每个框架生成架构图后保存"],
+    prompt: async () => answers.shift(),
+    write: (chunk) => output.push(chunk),
+    createMainAgent: async () =>
+      createFakeMainAgent({
+        调研热门框架并为每个框架生成架构图后保存: {
+          summary: "I interpreted your request as 11 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            { id: 1, title: "调研热门框架", details: "调研热门框架", dependsOn: [], onDependencyFailure: "ask_user", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 2, title: "筛选 Top 3 框架", details: "根据调研结果筛选 Top 3 框架", dependsOn: [1], onDependencyFailure: "abort", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 3, title: "分析框架 A", details: "分析 shortlisted 框架 A", dependsOn: [2], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 4, title: "生成框架 A 架构图", details: "生成框架 A 架构图", dependsOn: [3], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 5, title: "保存框架 A 结果", details: "保存框架 A 结果", dependsOn: [4], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 6, title: "分析框架 B", details: "分析 shortlisted 框架 B", dependsOn: [2], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 7, title: "生成框架 B 架构图", details: "生成框架 B 架构图", dependsOn: [6], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 8, title: "保存框架 B 结果", details: "保存框架 B 结果", dependsOn: [7], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 9, title: "分析框架 C", details: "分析 shortlisted 框架 C", dependsOn: [2], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 10, title: "生成框架 C 架构图", details: "生成框架 C 架构图", dependsOn: [9], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 11, title: "保存框架 C 结果", details: "保存框架 C 结果", dependsOn: [10], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+          ],
+        },
+      }),
+    createRunner: async () =>
+      new FakeRunner(Array.from({ length: 11 }, (_, index) => ({
+        status: "success",
+        summary: `done ${index + 1}`,
+        artifacts: [],
+        rawOutput: "",
+      }))),
+  });
+
+  const rendered = normalizeOutput(output);
+  assert.equal(result.exitCode, 0);
+  assert.match(rendered, /2\. 筛选 Top 3 框架/);
+  assert.match(rendered, /Wave 3 \(parallel\): 3\. 分析框架 A \| 6\. 分析框架 B \| 9\. 分析框架 C/);
+  assert.match(rendered, /Wave 4 \(parallel\): 4\. 生成框架 A 架构图 \| 7\. 生成框架 B 架构图 \| 10\. 生成框架 C 架构图/);
+  assert.match(rendered, /Wave 5 \(parallel\): 5\. 保存框架 A 结果 \| 8\. 保存框架 B 结果 \| 11\. 保存框架 C 结果/);
+});
+
 test("runApp asks the user to clarify when the todo looks like one ambiguous compound task", async () => {
   const answers = [
     "搜集热门 harness 框架并画出他们的架构图保存到本地",
@@ -696,4 +824,104 @@ test("runApp waits for dependency completion before starting dependent tasks", a
   resolveFirst();
   await appPromise;
   assert.deepEqual(started, ["Collect source material", "Publish final deliverable"]);
+});
+
+test("runApp only blocks the failed entity chain while independent entity chains continue", async () => {
+  const answers = ["yes"];
+  const output = [];
+  const started = [];
+
+  const result = await runApp({
+    args: ["调研热门框架并为每个框架生成架构图后保存"],
+    prompt: async () => answers.shift(),
+    write: (chunk) => output.push(chunk),
+    createMainAgent: async () =>
+      createFakeMainAgent({
+        调研热门框架并为每个框架生成架构图后保存: {
+          summary: "I interpreted your request as 8 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            { id: 1, title: "调研热门框架", details: "调研热门框架", dependsOn: [], onDependencyFailure: "ask_user", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 2, title: "筛选 Top 2 框架", details: "根据调研结果筛选 Top 2 框架", dependsOn: [1], onDependencyFailure: "abort", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 3, title: "分析框架 A", details: "分析 shortlisted 框架 A", dependsOn: [2], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 4, title: "生成框架 A 架构图", details: "生成框架 A 架构图", dependsOn: [3], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 5, title: "保存框架 A 结果", details: "保存框架 A 结果", dependsOn: [4], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 6, title: "分析框架 B", details: "分析 shortlisted 框架 B", dependsOn: [2], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 7, title: "生成框架 B 架构图", details: "生成框架 B 架构图", dependsOn: [6], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 8, title: "保存框架 B 结果", details: "保存框架 B 结果", dependsOn: [7], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+          ],
+        },
+      }),
+    createRunner: async () => ({
+      async runTask(task) {
+        started.push(task.title);
+        if (task.id === 4) {
+          return { status: "failed", summary: "framework A diagram failed", artifacts: [], rawOutput: "" };
+        }
+        return { status: "success", summary: `${task.title} ok`, artifacts: [], rawOutput: "" };
+      },
+    }),
+  });
+
+  const rendered = normalizeOutput(output);
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(started.slice(0, 2), ["调研热门框架", "筛选 Top 2 框架"]);
+  assert.deepEqual(started.slice(2, 4).sort(), ["分析框架 A", "分析框架 B"]);
+  assert.deepEqual(started.slice(4, 6).sort(), ["生成框架 A 架构图", "生成框架 B 架构图"]);
+  assert.equal(started[6], "保存框架 B 结果");
+  assert.doesNotMatch(rendered, /Running #5\/8: 保存框架 A 结果/);
+  assert.match(rendered, /Skipping #5/);
+  assert.match(rendered, /Running #8\/8: 保存框架 B 结果/);
+});
+
+test("runApp persists finer object-level plans without schema changes", async () => {
+  const answers = [""];
+  const output = [];
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-fine-plan-"));
+
+  const result = await runApp({
+    args: ["调研热门框架并为每个框架生成架构图后保存"],
+    prompt: async () => answers.shift(),
+    write: (chunk) => output.push(chunk),
+    createMainAgent: async () =>
+      createFakeMainAgent({
+        调研热门框架并为每个框架生成架构图后保存: {
+          summary: "I interpreted your request as 5 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            { id: 1, title: "调研热门框架", details: "调研热门框架", dependsOn: [], onDependencyFailure: "ask_user", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 2, title: "筛选 Top 1 框架", details: "根据调研结果筛选 Top 1 框架", dependsOn: [1], onDependencyFailure: "abort", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 3, title: "分析框架 A", details: "分析 shortlisted 框架 A", dependsOn: [2], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 4, title: "生成框架 A 架构图", details: "生成框架 A 架构图", dependsOn: [3], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+            { id: 5, title: "保存框架 A 结果", details: "保存框架 A 结果", dependsOn: [4], onDependencyFailure: "skip", dependencyFailurePrompt: "", status: "pending", resultSummary: "", rawOutput: "" },
+          ],
+        },
+      }),
+    createRunner: async () =>
+      new FakeRunner([
+        { status: "success", summary: "research done", artifacts: [], rawOutput: "" },
+        { status: "success", summary: "shortlist done", artifacts: [], rawOutput: "" },
+        { status: "success", summary: "analysis done", artifacts: [], rawOutput: "" },
+        { status: "success", summary: "diagram done", artifacts: [], rawOutput: "" },
+        { status: "success", summary: "save done", artifacts: ["outputs/task-5/result.md"], rawOutput: "" },
+      ]),
+    cwd: tempDir,
+  });
+
+  const planText = await fs.readFile(path.join(tempDir, "outputs", "execution-plan.md"), "utf8");
+  const progress = JSON.parse(await fs.readFile(path.join(tempDir, "outputs", "execution-progress.json"), "utf8"));
+
+  assert.equal(result.exitCode, 0);
+  assert.match(planText, /2\. 筛选 Top 1 框架/);
+  assert.match(planText, /3\. 分析框架 A/);
+  assert.deepEqual(progress.tasks.map((task) => task.title), [
+    "调研热门框架",
+    "筛选 Top 1 框架",
+    "分析框架 A",
+    "生成框架 A 架构图",
+    "保存框架 A 结果",
+  ]);
+  assert.match(normalizeOutput(output), /\[Plan\] Saved execution plan to outputs\/execution-plan\.md/);
 });

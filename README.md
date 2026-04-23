@@ -5,11 +5,13 @@ Minimal multi-agent orchestrator demo with a Node.js CLI. The default backend us
 ## What it does
 
 - Accepts a todo list from CLI args or interactive input
-- Normalizes the list into numbered tasks
+- Uses a main agent to split the request into finer flat tasks
 - Asks the user to confirm or re-enter the full list
-- Launches one child agent per task, sequentially
+- Shows dependency-aware execution waves before running
+- Launches one child agent per task with parallel execution for independent tasks
 - Aggregates task results into a final summary
 - Passes completed task results into later tasks as explicit context
+- Persists the execution plan and resumable progress state to `outputs/`
 - Can save local artifacts returned by the model
 
 ## Run
@@ -48,6 +50,8 @@ npm test
 ## Notes
 
 - Todo items are split on `;` or newlines
+- The main agent prefers smaller single-action tasks and can produce explicit shortlist plus per-entity task chains
+- Tasks stay flat and use `dependsOn` to express ordering and parallelism
 - Default mode requires a working `codex` CLI and uses `@openai/codex-sdk`
 - OpenAI mode requires `AGENT_FLOW_RUNNER=openai` and `OPENAI_API_KEY`
 - OpenAI mode uses `gpt-5.2` by default; override with `OPENAI_MODEL`

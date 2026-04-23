@@ -126,6 +126,16 @@ async function confirmTasks({ analysis, prompt, write, mainAgent }) {
     for (const task of currentAnalysis.tasks) {
       write(`${task.id}. ${task.title}\n`);
     }
+    const executionWaves = buildExecutionWaves(currentAnalysis.tasks);
+    if (executionWaves.length > 0) {
+      write(`${formatHeader("Parallel execution plan:")}\n`);
+      write(`${formatInfo("Tasks in the same wave will run in parallel. Later waves will wait for their dependencies.")}\n`);
+      for (const [index, wave] of executionWaves.entries()) {
+        const label = wave.length > 1 ? `Wave ${index + 1} (parallel)` : `Wave ${index + 1}`;
+        const taskList = wave.map((task) => `${task.id}. ${task.title}`).join(" | ");
+        write(`${label}: ${taskList}\n`);
+      }
+    }
 
     const answer = (await prompt(`${formatPrompt("Confirm tasks? (yes/no) [default: yes]: ")}`)).trim().toLowerCase();
     if (answer === "" || answer === "yes" || answer === "y") {
@@ -479,6 +489,36 @@ function markUnresolvableTasks(tasks, completedTasks, write) {
     completedTasks.push(task);
     write(`${formatWarning(`Skipping #${task.id} because its dependencies never became runnable.`)}\n`);
   }
+}
+
+function buildExecutionWaves(tasks) {
+  const remaining = tasks.map((task) => ({ ...task }));
+  const completedIds = new Set();
+  const waves = [];
+
+  while (remaining.length > 0) {
+    const ready = remaining.filter((task) => {
+      const dependsOn = Array.isArray(task.dependsOn) ? task.dependsOn : [];
+      return dependsOn.every((dependencyId) => completedIds.has(dependencyId));
+    });
+
+    if (ready.length === 0) {
+      break;
+    }
+
+    waves.push(ready);
+    for (const task of ready) {
+      completedIds.add(task.id);
+    }
+    for (const task of ready) {
+      const index = remaining.findIndex((candidate) => candidate.id === task.id);
+      if (index >= 0) {
+        remaining.splice(index, 1);
+      }
+    }
+  }
+
+  return waves;
 }
 
 function getExecutionPaths(cwd) {
