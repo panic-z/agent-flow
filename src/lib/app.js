@@ -44,6 +44,7 @@ export async function runApp({
 
       const confirmation = await confirmTasks({
         analysis,
+        initialText,
         prompt,
         write,
         mainAgent,
@@ -75,6 +76,10 @@ export async function runApp({
       });
     }
 
+    if (!mainAgent) {
+      mainAgent = await createMainAgent();
+    }
+
     write(`\n${formatStage("Stage 3/4: initializing sub-agent runner.")}\n`);
     runner = await createRunner();
 
@@ -87,9 +92,11 @@ export async function runApp({
     const summary = await runTaskLoop({
       tasks: confirmedTasks,
       runner,
+      mainAgent,
       prompt,
       write,
       originalInput,
+      sessionContext,
       startedAt,
       summaryText,
       progressPath: statePaths.progressPath,
@@ -123,18 +130,32 @@ export async function runApp({
   }
 }
 
-async function confirmTasks({ analysis, prompt, write, mainAgent, sessionContext }) {
+async function confirmTasks({ analysis, initialText, prompt, write, mainAgent, sessionContext }) {
   let currentAnalysis = analysis;
+  let currentRequestText = initialText;
 
   while (true) {
     write(`\n${formatStage("Stage 2/4: waiting for your confirmation.")}\n`);
     if (currentAnalysis.needsClarification) {
       write(`${formatWarning(currentAnalysis.clarificationPrompt)}\n`);
       const replacement = await prompt(`${formatPrompt("Please update the todo list with the clarification above: ")}`);
+      currentRequestText = replacement;
       currentAnalysis = await mainAgent.analyzeTodo(buildAnalysisInput(replacement, sessionContext));
       if (currentAnalysis.tasks.length === 0) {
         write(`${formatWarning("No tasks detected, please try again.")}\n`);
       }
+      continue;
+    }
+
+    if (currentAnalysis.tasks.length === 0) {
+      write(`${formatWarning("No tasks detected, please try again.")}\n`);
+      const feedback = await prompt(`${formatPrompt("Describe the task or how to adjust the plan: ")}`);
+      currentAnalysis = await mainAgent.analyzeTodo(buildPlanRevisionInput({
+        originalRequest: currentRequestText,
+        currentAnalysis,
+        userFeedback: feedback,
+        sessionContext,
+      }));
       continue;
     }
 
@@ -169,7 +190,8 @@ async function confirmTasks({ analysis, prompt, write, mainAgent, sessionContext
       : answer;
 
     currentAnalysis = await mainAgent.analyzeTodo(buildPlanRevisionInput({
-      originalInput: currentAnalysis,
+      originalRequest: currentRequestText,
+      currentAnalysis,
       userFeedback: feedback,
       sessionContext,
     }));
@@ -179,8 +201,8 @@ async function confirmTasks({ analysis, prompt, write, mainAgent, sessionContext
   }
 }
 
-function buildPlanRevisionInput({ originalInput, userFeedback, sessionContext }) {
-  const currentPlan = originalInput.tasks
+function buildPlanRevisionInput({ originalRequest, currentAnalysis, userFeedback, sessionContext }) {
+  const currentPlan = currentAnalysis.tasks
     .map((task) => {
       const dependsOn = Array.isArray(task.dependsOn) && task.dependsOn.length > 0
         ? task.dependsOn.join(", ")
@@ -190,8 +212,8 @@ function buildPlanRevisionInput({ originalInput, userFeedback, sessionContext })
     .join("\n");
 
   const baseSections = [
-    "Original user request:",
-    sessionContext?.originalRequest || "(not available)",
+    sessionContext?.originalRequest ? "Current round request:" : "Original user request:",
+    originalRequest || "(not available)",
     "",
     "Current proposed plan:",
     currentPlan,
@@ -269,9 +291,11 @@ function buildSessionContext({ initialText, sessionContext, tasks }) {
 async function runTaskLoop({
   tasks,
   runner,
+  mainAgent,
   prompt,
   write,
   originalInput,
+  sessionContext,
   startedAt,
   summaryText,
   progressPath,
@@ -289,7 +313,8 @@ async function runTaskLoop({
   const runningTasks = new Map();
   let successCount = initialSuccessCount;
   let failureCount = initialFailureCount;
-  const total = tasks.length;
+  let total = tasks.length;
+  let processedCompletedCount = completedTasks.length;
 
   for (const task of tasks) {
     if (task.status === "running") {
@@ -396,6 +421,47 @@ async function runTaskLoop({
     }
 
     await Promise.race(Array.from(runningTasks.values(), ({ promise }) => promise));
+
+    while (processedCompletedCount < completedTasks.length) {
+      const justCompletedTask = completedTasks[processedCompletedCount];
+      processedCompletedCount += 1;
+
+      const pendingTasks = tasks.filter((task) => task.status === "pending");
+      if (pendingTasks.length === 0 || typeof mainAgent?.replanRemainingTasks !== "function") {
+        continue;
+      }
+
+      const replan = await maybeReplanRemainingTasks({
+        mainAgent,
+        originalInput,
+        sessionContext,
+        tasks,
+        completedTasks,
+        runningTasks,
+        justCompletedTask,
+        write,
+      });
+
+      if (!replan) {
+        continue;
+      }
+
+      total = tasks.length;
+      await persistExecutionState({
+        progressPath,
+        relativeProgressPath,
+        originalInput,
+        startedAt,
+        summary: summaryText,
+        tasks,
+        runStatus: "in_progress",
+        currentTasks: Array.from(runningTasks.values()).map(({ task: runningTask }) => ({
+          id: runningTask.id,
+          title: runningTask.title,
+        })),
+        write,
+      });
+    }
   }
 
   await persistExecutionState({
@@ -431,6 +497,45 @@ function startTaskHeartbeat({ task, write, heartbeatMs, createInterval, clearInt
   return () => {
     clearInterval(timerId);
   };
+}
+
+async function maybeReplanRemainingTasks({
+  mainAgent,
+  originalInput,
+  sessionContext,
+  tasks,
+  completedTasks,
+  runningTasks,
+  justCompletedTask,
+  write,
+}) {
+  try {
+    const pendingTasks = tasks.filter((task) => task.status === "pending").map((task) => normalizePersistedTask(task));
+    const result = await mainAgent.replanRemainingTasks({
+      originalInput,
+      sessionContext,
+      justCompletedTask: normalizePersistedTask(justCompletedTask),
+      completedTasks: completedTasks.map((task) => normalizePersistedTask(task)),
+      runningTasks: Array.from(runningTasks.values(), ({ task }) => normalizePersistedTask(task)),
+      pendingTasks,
+    });
+
+    if (!result || !Array.isArray(result.pendingTasks)) {
+      return null;
+    }
+
+    const mergedTasks = mergeReplannedPendingTasks({
+      currentTasks: tasks,
+      pendingTasks: result.pendingTasks,
+    });
+
+    tasks.splice(0, tasks.length, ...mergedTasks);
+    write(`${formatInfo(`[Replan] ${result.summary || "Updated remaining work."}`)}\n`);
+    return result;
+  } catch (error) {
+    write(`${formatWarning(`[Replan] Skipped: ${error instanceof Error ? error.message : String(error)}`)}\n`);
+    return null;
+  }
 }
 
 function startTask({
@@ -516,6 +621,65 @@ function startTask({
     write(`  -> ${formatResultLabel(task.status)}: ${task.resultSummary}\n`);
     await onPersist();
   });
+}
+
+function mergeReplannedPendingTasks({ currentTasks, pendingTasks }) {
+  const frozenTasks = currentTasks.filter((task) => task.status !== "pending");
+  const existingPendingTasks = currentTasks.filter((task) => task.status === "pending");
+  const existingPendingIds = new Set(existingPendingTasks.map((task) => task.id));
+  const frozenIds = new Set(frozenTasks.map((task) => task.id));
+  const explicitPendingIds = new Set();
+  let nextId = currentTasks.reduce((maxId, task) => Math.max(maxId, Number(task.id) || 0), 0) + 1;
+
+  const normalizedPending = pendingTasks.map((task) => {
+    if (task.id != null && task.id !== 0) {
+      if (frozenIds.has(task.id)) {
+        throw new Error(`Task #${task.id} is already running or completed and cannot be replanned.`);
+      }
+      if (!existingPendingIds.has(task.id)) {
+        throw new Error(`Task #${task.id} is not part of the current pending plan.`);
+      }
+      if (explicitPendingIds.has(task.id)) {
+        throw new Error(`Task #${task.id} appears multiple times in the replanned pending work.`);
+      }
+      explicitPendingIds.add(task.id);
+      return normalizeReplannedTask(task, task.id);
+    }
+
+    const assignedId = nextId;
+    nextId += 1;
+    return normalizeReplannedTask(task, assignedId);
+  });
+
+  const allowedDependencyIds = new Set([
+    ...frozenIds,
+    ...normalizedPending.map((task) => task.id),
+  ]);
+
+  for (const task of normalizedPending) {
+    for (const dependencyId of task.dependsOn) {
+      if (!allowedDependencyIds.has(dependencyId)) {
+        throw new Error(`Task #${task.id} depends on unknown task #${dependencyId}.`);
+      }
+    }
+  }
+
+  return [...frozenTasks, ...normalizedPending];
+}
+
+function normalizeReplannedTask(task, id) {
+  return {
+    id,
+    title: task.title,
+    details: task.details,
+    dependsOn: Array.isArray(task.dependsOn) ? task.dependsOn : [],
+    onDependencyFailure: task.onDependencyFailure ?? "ask_user",
+    dependencyFailurePrompt: task.dependencyFailurePrompt ?? "",
+    status: "pending",
+    resultSummary: "",
+    artifacts: [],
+    rawOutput: "",
+  };
 }
 
 async function handleBlockedTask({

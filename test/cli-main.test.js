@@ -263,3 +263,60 @@ test("main passes session context into the next interactive round", async () => 
     ],
   });
 });
+
+test("main preserves a non-zero interactive exit code after a later successful follow-up", async () => {
+  let continuePromptCount = 0;
+
+  const exitCode = await main({
+    argv: [],
+    stdin: process.stdin,
+    stdout: { write() {} },
+    stderrStream: { write() {} },
+    processSignals: {
+      once() {},
+      off() {},
+    },
+    createReadline() {
+      return {
+        async question(promptText) {
+          if (promptText === "Enter todo list: ") {
+            return "first round fails";
+          }
+          if (/Continue with a follow-up/.test(promptText)) {
+            continuePromptCount += 1;
+            return continuePromptCount === 1 ? "second round succeeds" : "";
+          }
+          throw new Error(`Unexpected prompt: ${promptText}`);
+        },
+        close() {},
+      };
+    },
+    runAppImpl: async (options) => {
+      const inputText = options.args.join(" ");
+      return {
+        exitCode: inputText.includes("fails") ? 1 : 0,
+        tasks: [
+          {
+            id: 1,
+            title: inputText,
+            status: inputText.includes("fails") ? "failed" : "success",
+            resultSummary: inputText.includes("fails") ? "failed" : "succeeded",
+          },
+        ],
+        sessionContext: {
+          originalRequest: "first round fails",
+          latestRoundTasks: [
+            {
+              id: 1,
+              title: inputText,
+              status: inputText.includes("fails") ? "failed" : "success",
+              resultSummary: inputText.includes("fails") ? "failed" : "succeeded",
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  assert.equal(exitCode, 1);
+});

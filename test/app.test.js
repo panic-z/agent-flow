@@ -122,6 +122,95 @@ test("runApp includes session context when analyzing a follow-up round", async (
   assert.match(seenInputs[0], /New user follow-up:\ncompare the failed items and propose a retry plan/);
 });
 
+test("runApp includes the current follow-up when revising a follow-up round plan", async () => {
+  const answers = ["retry only framework B", "add a verification step", "yes"];
+  const seenInputs = [];
+
+  const result = await runApp({
+    args: [],
+    prompt: async () => answers.shift(),
+    write: () => {},
+    sessionContext: {
+      originalRequest: "research three frameworks and save summaries",
+      latestRoundTasks: [
+        {
+          id: 1,
+          title: "Research framework A",
+          status: "success",
+          resultSummary: "Framework A summary saved",
+        },
+        {
+          id: 2,
+          title: "Research framework B",
+          status: "failed",
+          resultSummary: "Framework B site timed out",
+        },
+      ],
+    },
+    createMainAgent: async () => ({
+      async analyzeTodo(input) {
+        seenInputs.push(input);
+        if (seenInputs.length === 1) {
+          return {
+            summary: "I interpreted your follow-up as 1 task.",
+            needsClarification: false,
+            clarificationPrompt: "",
+            tasks: [
+              {
+                id: 1,
+                title: "Retry framework B",
+                details: "Retry framework B",
+                dependsOn: [],
+                onDependencyFailure: "ask_user",
+                dependencyFailurePrompt: "",
+                status: "pending",
+                resultSummary: "",
+                rawOutput: "",
+              },
+            ],
+          };
+        }
+        return {
+          summary: "I revised the follow-up plan.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "Retry framework B",
+              details: "Retry framework B",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 2,
+              title: "Verify framework B retry result",
+              details: "Verify framework B retry result",
+              dependsOn: [1],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        };
+      },
+    }),
+    createRunner: async () => new FakeRunner(),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.match(seenInputs[1], /Session original request:\nresearch three frameworks and save summaries/);
+  assert.match(seenInputs[1], /Previous round results:/);
+  assert.match(seenInputs[1], /Current round request:\nretry only framework B/);
+  assert.match(seenInputs[1], /User feedback on the current plan:\nadd a verification step/);
+});
+
 test("runApp lets the user revise the proposed plan with direct feedback", async () => {
   const answers = ["bad task", "split it into first and second tasks", "yes"];
   const output = [];
@@ -175,6 +264,7 @@ test("runApp lets the user revise the proposed plan with direct feedback", async
   assert.match(normalizeOutput(output), /You can accept this plan, or reply with edits like "split task 2", "change the order", or "remove the save step"\./);
   assert.match(normalizeOutput(output), /1\. First/);
   assert.match(normalizeOutput(output), /2\. Second/);
+  assert.match(seenInputs[1], /Original user request:\nbad task/);
   assert.match(seenInputs[1], /Current proposed plan:/);
   assert.match(seenInputs[1], /User feedback on the current plan:\nsplit it into first and second tasks/);
 });
@@ -487,6 +577,66 @@ test("runApp does not exit early when the main agent needs clarification and has
   assert.match(normalizeOutput(output), /Please split this request into explicit tasks before I continue\./);
   assert.match(normalizeOutput(output), /1\. 搜集热门 harness 框架/);
   assert.doesNotMatch(normalizeOutput(output), /No tasks provided\./);
+});
+
+test("runApp does not allow accepting an empty revised plan", async () => {
+  const answers = [
+    "bad task",
+    "remove everything",
+    "",
+    "make one concrete task",
+    "yes",
+  ];
+  const output = [];
+  const seenInputs = [];
+
+  const result = await runApp({
+    args: [],
+    prompt: async () => answers.shift(),
+    write: (chunk) => output.push(chunk),
+    createMainAgent: async () => ({
+      async analyzeTodo(input) {
+        seenInputs.push(input);
+        if (seenInputs.length === 1) {
+          return analyzeTodoText("bad task");
+        }
+        if (seenInputs.length === 2) {
+          return {
+            summary: "No executable tasks remain.",
+            needsClarification: false,
+            clarificationPrompt: "",
+            tasks: [],
+          };
+        }
+        return {
+          summary: "I revised the plan into 1 task.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "Concrete task",
+              details: "Concrete task",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        };
+      },
+    }),
+    createRunner: async () =>
+      new FakeRunner([
+        { status: "success", summary: "concrete done", artifacts: [], rawOutput: "" },
+      ]),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.match(normalizeOutput(output), /No tasks detected, please try again\./);
+  assert.match(normalizeOutput(output), /1\. Concrete task/);
 });
 
 test("runApp uses a clearer clarification prompt label", async () => {
@@ -998,6 +1148,190 @@ test("runApp waits for dependency completion before starting dependent tasks", a
   resolveFirst();
   await appPromise;
   assert.deepEqual(started, ["Collect source material", "Publish final deliverable"]);
+});
+
+test("runApp replans remaining work after a completed task and can add new pending tasks", async () => {
+  const answers = ["yes"];
+  const output = [];
+  const started = [];
+  const replanCalls = [];
+
+  const result = await runApp({
+    args: ["collect source material; publish final deliverable"],
+    prompt: async () => answers.shift(),
+    write: (chunk) => output.push(chunk),
+    createMainAgent: async () => ({
+      async analyzeTodo() {
+        return {
+          summary: "I interpreted your request as 2 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "Collect source material",
+              details: "Collect source material",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 2,
+              title: "Publish final deliverable",
+              details: "Publish final deliverable",
+              dependsOn: [1],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        };
+      },
+      async replanRemainingTasks(context) {
+        replanCalls.push({
+          justCompletedTask: context.justCompletedTask.title,
+          pendingTasks: context.pendingTasks.map((task) => ({ id: task.id, title: task.title })),
+          completedTasks: context.completedTasks.map((task) => task.title),
+        });
+        if (context.justCompletedTask.id === 1) {
+          return {
+            summary: "Added a preparation step before publishing.",
+            pendingTasks: [
+              {
+                id: 0,
+                title: "Prepare appendix",
+                details: "Prepare appendix",
+                dependsOn: [1],
+                onDependencyFailure: "ask_user",
+                dependencyFailurePrompt: "",
+              },
+              {
+                id: 2,
+                title: "Publish final deliverable",
+                details: "Publish final deliverable",
+                dependsOn: [1, 3],
+                onDependencyFailure: "ask_user",
+                dependencyFailurePrompt: "",
+              },
+            ],
+          };
+        }
+        return {
+          summary: "No further changes.",
+          pendingTasks: context.pendingTasks,
+        };
+      },
+    }),
+    createRunner: async () => ({
+      async runTask(task) {
+        started.push(task.title);
+        return {
+          status: "success",
+          summary: `${task.title} done`,
+          artifacts: [],
+          rawOutput: "",
+        };
+      },
+    }),
+  });
+
+  const rendered = normalizeOutput(output);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(started, ["Collect source material", "Prepare appendix", "Publish final deliverable"]);
+  assert.equal(replanCalls.length, 2);
+  assert.deepEqual(replanCalls[0], {
+    justCompletedTask: "Collect source material",
+    pendingTasks: [{ id: 2, title: "Publish final deliverable" }],
+    completedTasks: ["Collect source material"],
+  });
+  assert.match(rendered, /\[Replan\] Added a preparation step before publishing\./);
+});
+
+test("runApp ignores invalid replans and keeps executing the previous pending tasks", async () => {
+  const answers = ["yes"];
+  const output = [];
+  const started = [];
+
+  const result = await runApp({
+    args: ["collect source material; publish final deliverable"],
+    prompt: async () => answers.shift(),
+    write: (chunk) => output.push(chunk),
+    createMainAgent: async () => ({
+      async analyzeTodo() {
+        return {
+          summary: "I interpreted your request as 2 tasks.",
+          needsClarification: false,
+          clarificationPrompt: "",
+          tasks: [
+            {
+              id: 1,
+              title: "Collect source material",
+              details: "Collect source material",
+              dependsOn: [],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+            {
+              id: 2,
+              title: "Publish final deliverable",
+              details: "Publish final deliverable",
+              dependsOn: [1],
+              onDependencyFailure: "ask_user",
+              dependencyFailurePrompt: "",
+              status: "pending",
+              resultSummary: "",
+              rawOutput: "",
+            },
+          ],
+        };
+      },
+      async replanRemainingTasks(context) {
+        if (context.justCompletedTask.id === 1) {
+          return {
+            summary: "This replan is invalid.",
+            pendingTasks: [
+              {
+                id: 2,
+                title: "Publish final deliverable",
+                details: "Publish final deliverable",
+                dependsOn: [999],
+                onDependencyFailure: "ask_user",
+                dependencyFailurePrompt: "",
+              },
+            ],
+          };
+        }
+        return {
+          summary: "No further changes.",
+          pendingTasks: context.pendingTasks,
+        };
+      },
+    }),
+    createRunner: async () => ({
+      async runTask(task) {
+        started.push(task.title);
+        return {
+          status: "success",
+          summary: `${task.title} done`,
+          artifacts: [],
+          rawOutput: "",
+        };
+      },
+    }),
+  });
+
+  const rendered = normalizeOutput(output);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(started, ["Collect source material", "Publish final deliverable"]);
+  assert.match(rendered, /\[Replan\] Skipped: Task #2 depends on unknown task #999\./);
 });
 
 test("runApp only blocks the failed entity chain while independent entity chains continue", async () => {

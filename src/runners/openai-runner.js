@@ -86,6 +86,7 @@ export class OpenAIRunner {
       const persistedArtifacts = await writeArtifactFiles({
         cwd: this.cwd,
         defaultArtifactDir: executionPlan.artifactDir,
+        preferredOutputPath: executionPlan.preferredOutputPath,
         fileWrites: parsed.file_writes,
       });
 
@@ -142,6 +143,7 @@ export async function resolveTaskExecutionPlan({ cwd, baseTimeoutMs, task }) {
       ? 2
       : 1;
   const artifactDir = path.join(cwd, "outputs", `task-${task.id}`);
+  const preferredOutputPath = extractPreferredOutputPath(task);
 
   await fs.mkdir(artifactDir, { recursive: true });
 
@@ -150,6 +152,7 @@ export async function resolveTaskExecutionPlan({ cwd, baseTimeoutMs, task }) {
     timeoutMs: baseTimeoutMs * timeoutMultiplier,
     artifactDir,
     relativeArtifactDir: path.relative(cwd, artifactDir) || ".",
+    preferredOutputPath,
   };
 }
 
@@ -170,10 +173,13 @@ function buildTaskPrompt(task, executionPlan, context) {
     hints.requiresLocalArtifacts
       ? [
           "If this task should save local output, use file_writes to provide the file contents.",
-          `Default output directory: ${executionPlan.relativeArtifactDir}`,
+          executionPlan.preferredOutputPath
+            ? `If this task creates the requested final file, write it to exactly this relative path: ${executionPlan.preferredOutputPath}. Use ${executionPlan.relativeArtifactDir} only for extra intermediate artifacts.`
+            : `Default output directory: ${executionPlan.relativeArtifactDir}`,
           "For architecture diagrams, prefer Mermaid in a .md or .mmd file unless the task explicitly requires another format.",
         ].join("\n")
       : "Keep file_writes empty unless local files are genuinely needed.",
+    formatAppendInstructions(task),
   ].join("\n");
 }
 
@@ -193,11 +199,11 @@ function formatPreviousResults(completedTasks) {
   ].join("\n");
 }
 
-async function writeArtifactFiles({ cwd, defaultArtifactDir, fileWrites }) {
+async function writeArtifactFiles({ cwd, defaultArtifactDir, preferredOutputPath, fileWrites }) {
   const saved = [];
 
   for (const fileWrite of fileWrites) {
-    const relativePath = sanitizeArtifactPath(fileWrite.path, defaultArtifactDir, cwd);
+    const relativePath = sanitizeArtifactPath(fileWrite.path, defaultArtifactDir, cwd, preferredOutputPath);
     const absolutePath = path.join(cwd, relativePath);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, fileWrite.content, "utf8");
@@ -207,14 +213,57 @@ async function writeArtifactFiles({ cwd, defaultArtifactDir, fileWrites }) {
   return saved;
 }
 
-function sanitizeArtifactPath(requestedPath, defaultArtifactDir, cwd) {
+function sanitizeArtifactPath(requestedPath, defaultArtifactDir, cwd, preferredOutputPath = null) {
   const fallback = path.relative(cwd, path.join(defaultArtifactDir, "artifact.txt"));
   const candidate = requestedPath?.trim() ? requestedPath.trim() : fallback;
   const relative = path.normalize(candidate).replace(/^(\.\.(\/|\\|$))+/, "");
   if (path.isAbsolute(relative) || relative === "") {
     return fallback;
   }
+  if (preferredOutputPath) {
+    const normalizedPreferred = path.normalize(preferredOutputPath).replace(/\\/g, "/");
+    const normalizedRelative = relative.replace(/\\/g, "/");
+    const nestedPreferred = path.relative(cwd, path.join(defaultArtifactDir, normalizedPreferred)).replace(/\\/g, "/");
+    const defaultArtifactRelativeDir = path.relative(cwd, defaultArtifactDir).replace(/\\/g, "/");
+    const isInsideDefaultArtifactDir = normalizedRelative === defaultArtifactRelativeDir
+      || normalizedRelative.startsWith(`${defaultArtifactRelativeDir}/`);
+    const isBareFilename = !normalizedRelative.includes("/");
+    if (
+      normalizedRelative === nestedPreferred
+      || ((isInsideDefaultArtifactDir || isBareFilename) && path.basename(normalizedRelative) === path.basename(normalizedPreferred))
+    ) {
+      return normalizedPreferred;
+    }
+  }
   return relative;
+}
+
+function extractPreferredOutputPath(task) {
+  const text = `${task.title ?? ""} ${task.details ?? ""}`;
+  const explicitMatch = text.match(/(?:save|write|append|create|保存(?:到|至|为)?|写入|追加(?:到|至)?|创建(?:到|至)?)[\s\S]{0,120}?\b((?:outputs|docs|artifacts)\/[^\s`'")，。；;]+)/i);
+  const requestedPath = explicitMatch?.[1];
+
+  if (!requestedPath) {
+    return null;
+  }
+
+  const normalized = path.normalize(requestedPath).replace(/\\/g, "/");
+  if (path.isAbsolute(normalized) || normalized === "" || normalized.startsWith("../") || normalized.includes("/../")) {
+    return null;
+  }
+  return normalized;
+}
+
+function formatAppendInstructions(task) {
+  const text = `${task.title ?? ""} ${task.details ?? ""}`;
+  if (!/(append|追加)/i.test(text)) {
+    return "";
+  }
+
+  return [
+    "When appending text to an existing file, preserve the existing content and do not create extra blank lines.",
+    "If the existing file already ends with a newline, append the new line directly; otherwise insert exactly one newline before the appended text.",
+  ].join("\n");
 }
 
 function dedupeArtifacts(artifacts) {

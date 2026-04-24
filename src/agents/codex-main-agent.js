@@ -122,6 +122,47 @@ const ANALYSIS_SCHEMA = {
   required: ["summary", "needsClarification", "clarificationPrompt", "tasks"],
 };
 
+const REPLAN_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: {
+      type: "string",
+    },
+    pendingTasks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: {
+            type: "integer",
+            minimum: 0,
+          },
+          title: { type: "string" },
+          details: { type: "string" },
+          dependsOn: {
+            type: "array",
+            items: {
+              type: "integer",
+              minimum: 1,
+            },
+          },
+          onDependencyFailure: {
+            type: "string",
+            enum: ["ask_user", "skip", "abort"],
+          },
+          dependencyFailurePrompt: {
+            type: "string",
+          },
+        },
+        required: ["id", "title", "details", "dependsOn", "onDependencyFailure", "dependencyFailurePrompt"],
+      },
+    },
+  },
+  required: ["summary", "pendingTasks"],
+};
+
 export class CodexMainAgent {
   constructor({
     codexClient,
@@ -180,6 +221,27 @@ export class CodexMainAgent {
         throw new Error("Execution interrupted.");
       }
       return fallbackClarification();
+    }
+  }
+
+  async replanRemainingTasks(context) {
+    const signal = anySignal([AbortSignal.timeout(this.timeoutMs), this.shutdownController.signal]);
+    const thread = this.getThread();
+
+    try {
+      const turn = await thread.run(buildReplanPrompt(context), {
+        outputSchema: REPLAN_SCHEMA,
+        signal,
+      });
+      return normalizeReplan(turn.finalResponse);
+    } catch (error) {
+      if (this.shutdownController.signal.aborted) {
+        throw new Error("Execution interrupted.");
+      }
+      return {
+        summary: "Replanning failed. Keeping the existing pending tasks.",
+        pendingTasks: context.pendingTasks ?? [],
+      };
     }
   }
 
@@ -265,6 +327,33 @@ function buildRetryPrompt(input, previousAnalysis) {
   ].join("\n");
 }
 
+function buildReplanPrompt(context) {
+  return [
+    "You are the main agent in a multi-agent orchestrator demo.",
+    "A child task just completed. Replan only the remaining pending tasks and return strict JSON only.",
+    "Do not modify completed tasks or currently running tasks.",
+    "You may keep, remove, reorder, or add pending tasks.",
+    "For existing pending tasks that remain, preserve their current id.",
+    "For newly added tasks, set id to 0 so the orchestrator can assign the final id.",
+    "New tasks may depend only on completed tasks, currently running tasks, or preserved pending-task ids.",
+    "Return only the remaining pending tasks. Do not repeat completed or running tasks.",
+    "Original user request:",
+    context.sessionContext?.originalRequest || context.originalInput || "(not available)",
+    "",
+    "Just completed task:",
+    formatReplanTask(context.justCompletedTask),
+    "",
+    "Completed task results:",
+    formatReplanTaskList(context.completedTasks),
+    "",
+    "Currently running tasks:",
+    formatReplanTaskList(context.runningTasks),
+    "",
+    "Pending tasks before replanning:",
+    formatReplanTaskList(context.pendingTasks),
+  ].join("\n");
+}
+
 async function runAnalysisTurn({ thread, prompt, signal }) {
   const turn = await thread.run(prompt, {
     outputSchema: ANALYSIS_SCHEMA,
@@ -272,6 +361,58 @@ async function runAnalysisTurn({ thread, prompt, signal }) {
   });
 
   return normalizeAnalysis(turn.finalResponse);
+}
+
+function normalizeReplan(output) {
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error("No valid JSON result found in replan output.");
+  }
+
+  const pendingTasks = Array.isArray(parsed.pendingTasks)
+    ? parsed.pendingTasks
+        .filter((task) => task && task.title && task.details)
+        .map((task) => ({
+          ...(Number.isInteger(task.id) && task.id > 0 ? { id: task.id } : {}),
+          title: task.title.trim(),
+          details: task.details.trim(),
+          dependsOn: Array.isArray(task.dependsOn)
+            ? task.dependsOn.filter((dependencyId) => Number.isInteger(dependencyId) && dependencyId > 0)
+            : [],
+          onDependencyFailure: normalizeDependencyPolicy(task.onDependencyFailure),
+          dependencyFailurePrompt:
+            typeof task.dependencyFailurePrompt === "string" ? task.dependencyFailurePrompt.trim() : "",
+        }))
+    : [];
+
+  return {
+    summary: typeof parsed.summary === "string" ? parsed.summary : "Updated remaining work.",
+    pendingTasks,
+  };
+}
+
+function formatReplanTask(task) {
+  if (!task) {
+    return "(none)";
+  }
+
+  return [
+    `#${task.id} ${task.title}`,
+    `details: ${task.details || "(none)"}`,
+    `status: ${task.status || "pending"}`,
+    `dependsOn: ${Array.isArray(task.dependsOn) && task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "(none)"}`,
+    `resultSummary: ${task.resultSummary || "(none)"}`,
+  ].join("\n");
+}
+
+function formatReplanTaskList(tasks) {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    return "(none)";
+  }
+
+  return tasks.map((task) => formatReplanTask(task)).join("\n\n");
 }
 
 function normalizeAnalysis(output) {

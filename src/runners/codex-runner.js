@@ -155,6 +155,7 @@ export async function resolveTaskExecutionPlan({ cwd, baseTimeoutMs, task }) {
       ? 2
       : 1;
   const artifactDir = path.join(cwd, "outputs", `task-${task.id}`);
+  const preferredOutputPath = extractPreferredOutputPath(task);
 
   await fs.mkdir(artifactDir, { recursive: true });
 
@@ -163,6 +164,7 @@ export async function resolveTaskExecutionPlan({ cwd, baseTimeoutMs, task }) {
     timeoutMs: baseTimeoutMs * timeoutMultiplier,
     artifactDir,
     relativeArtifactDir: path.relative(cwd, artifactDir) || ".",
+    preferredOutputPath,
   };
 }
 
@@ -181,12 +183,54 @@ function buildCodexPrompt(task, executionPlan, context) {
       ? "Use web search when you need current or external information."
       : "Do not do unnecessary external research.",
     hints.requiresLocalArtifacts
-      ? [
-          `If you create local files, save them under ${executionPlan.relativeArtifactDir}.`,
-          "List relative file paths in artifacts.",
-          "For architecture diagrams, prefer Mermaid in a .md or .mmd file unless another format is explicitly requested.",
-        ].join("\n")
+      ? formatArtifactInstructions(executionPlan)
       : "Return an empty artifacts array unless you actually create local files.",
+    formatAppendInstructions(task),
+  ].join("\n");
+}
+
+function formatArtifactInstructions(executionPlan) {
+  if (executionPlan.preferredOutputPath) {
+    return [
+      `If this task creates the requested final file, write the final file to exactly this relative path: ${executionPlan.preferredOutputPath}.`,
+      `Use ${executionPlan.relativeArtifactDir} only for extra intermediate artifacts.`,
+      "List relative file paths in artifacts.",
+      "For architecture diagrams, prefer Mermaid in a .md or .mmd file unless another format is explicitly requested.",
+    ].join("\n");
+  }
+
+  return [
+    `If you create local files, save them under ${executionPlan.relativeArtifactDir}.`,
+    "List relative file paths in artifacts.",
+    "For architecture diagrams, prefer Mermaid in a .md or .mmd file unless another format is explicitly requested.",
+  ].join("\n");
+}
+
+function extractPreferredOutputPath(task) {
+  const text = `${task.title ?? ""} ${task.details ?? ""}`;
+  const explicitMatch = text.match(/(?:save|write|append|create|保存(?:到|至|为)?|写入|追加(?:到|至)?|创建(?:到|至)?)[\s\S]{0,120}?\b((?:outputs|docs|artifacts)\/[^\s`'")，。；;]+)/i);
+  const requestedPath = explicitMatch?.[1];
+
+  if (!requestedPath) {
+    return null;
+  }
+
+  const normalized = path.normalize(requestedPath).replace(/\\/g, "/");
+  if (path.isAbsolute(normalized) || normalized === "" || normalized.startsWith("../") || normalized.includes("/../")) {
+    return null;
+  }
+  return normalized;
+}
+
+function formatAppendInstructions(task) {
+  const text = `${task.title ?? ""} ${task.details ?? ""}`;
+  if (!/(append|追加)/i.test(text)) {
+    return "";
+  }
+
+  return [
+    "When appending text to an existing file, preserve the existing content and do not create extra blank lines.",
+    "If the existing file already ends with a newline, append the new line directly; otherwise insert exactly one newline before the appended text.",
   ].join("\n");
 }
 

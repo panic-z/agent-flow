@@ -48,6 +48,51 @@ test("resolveTaskExecutionPlan increases timeout and creates an output directory
   assert.match(plan.artifactDir, /outputs\/task-2$/);
 });
 
+test("resolveTaskExecutionPlan detects explicit output paths", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-openai-path-"));
+  const plan = await resolveTaskExecutionPlan({
+    cwd: tempDir,
+    baseTimeoutMs: 5_000,
+    task: {
+      id: 3,
+      title: "Save headings result",
+      details: "save the result to outputs/readme-headings.txt",
+    },
+  });
+
+  assert.equal(plan.preferredOutputPath, "outputs/readme-headings.txt");
+});
+
+test("resolveTaskExecutionPlan detects follow-up output paths without save/write verbs", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-openai-followup-path-"));
+  const plan = await resolveTaskExecutionPlan({
+    cwd: tempDir,
+    baseTimeoutMs: 5_000,
+    task: {
+      id: 4,
+      title: "Append exact second line to follow-up file",
+      details: "append a second line containing exactly: second round ok, to outputs/e2e-real-cli-followup.txt",
+    },
+  });
+
+  assert.equal(plan.preferredOutputPath, "outputs/e2e-real-cli-followup.txt");
+});
+
+test("resolveTaskExecutionPlan does not treat read-only referenced output paths as write targets", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-openai-read-path-"));
+  const plan = await resolveTaskExecutionPlan({
+    cwd: tempDir,
+    baseTimeoutMs: 5_000,
+    task: {
+      id: 5,
+      title: "Summarize previous output file",
+      details: "read outputs/source-notes.txt and summarize the important points",
+    },
+  });
+
+  assert.equal(plan.preferredOutputPath, null);
+});
+
 test("inferExecutionHints detects research and artifact requirements", () => {
   const hints = inferExecutionHints({
     title: "全网搜集热门的harness框架",
@@ -104,6 +149,31 @@ test("OpenAIRunner uses web_search and previous task context for research tasks"
   assert.equal(seen[0].options.timeout, 10_000);
 });
 
+test("OpenAIRunner prompts append tasks to avoid extra blank lines", async () => {
+  const seen = [];
+  const runner = new OpenAIRunner({
+    client: {
+      responses: {
+        create: async (body, options) => {
+          seen.push({ body, options });
+          return {
+            output_text: '{"status":"success","summary":"appended","artifacts":["outputs/e2e.txt"],"file_writes":[]}',
+          };
+        },
+      },
+    },
+  });
+
+  await runner.runTask({
+    id: 4,
+    title: "Append exact second line to the file",
+    details: "append a second line containing exactly: second line, to outputs/e2e.txt",
+  });
+
+  assert.match(seen[0].body.input, /When appending text to an existing file/);
+  assert.match(seen[0].body.input, /do not create extra blank lines/);
+});
+
 test("OpenAIRunner writes local artifacts from file_writes", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-openai-"));
   const runner = new OpenAIRunner({
@@ -138,6 +208,84 @@ test("OpenAIRunner writes local artifacts from file_writes", async () => {
   assert.equal(result.status, "success");
   assert.equal(saved, "graph TD\nA-->B");
   assert.deepEqual(result.artifacts, ["outputs/task-2/architecture.mmd"]);
+});
+
+test("OpenAIRunner writes explicit output paths instead of nested task artifacts", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-openai-explicit-"));
+  const runner = new OpenAIRunner({
+    cwd: tempDir,
+    client: {
+      responses: {
+        create: async () => ({
+          output_text: JSON.stringify({
+            status: "success",
+            summary: "headings saved",
+            artifacts: ["outputs/task-3/outputs/readme-headings.txt"],
+            file_writes: [
+              {
+                path: "outputs/task-3/outputs/readme-headings.txt",
+                content: "heading summary",
+              },
+            ],
+          }),
+        }),
+      },
+    },
+  });
+
+  const result = await runner.runTask({
+    id: 3,
+    title: "Save headings result",
+    details: "save the result to outputs/readme-headings.txt",
+  });
+
+  const preferred = await fs.readFile(path.join(tempDir, "outputs/readme-headings.txt"), "utf8");
+
+  await assert.rejects(
+    fs.readFile(path.join(tempDir, "outputs/task-3/outputs/readme-headings.txt"), "utf8"),
+    /ENOENT/,
+  );
+  assert.equal(preferred, "heading summary");
+  assert.deepEqual(result.artifacts, ["outputs/task-3/outputs/readme-headings.txt", "outputs/readme-headings.txt"]);
+});
+
+test("OpenAIRunner does not rewrite unrelated same-basename artifacts to the preferred output path", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-openai-same-basename-"));
+  const runner = new OpenAIRunner({
+    cwd: tempDir,
+    client: {
+      responses: {
+        create: async () => ({
+          output_text: JSON.stringify({
+            status: "success",
+            summary: "saved",
+            artifacts: ["artifacts/readme-headings.txt"],
+            file_writes: [
+              {
+                path: "artifacts/readme-headings.txt",
+                content: "intermediate notes",
+              },
+            ],
+          }),
+        }),
+      },
+    },
+  });
+
+  const result = await runner.runTask({
+    id: 3,
+    title: "Save headings result",
+    details: "save the result to outputs/readme-headings.txt",
+  });
+
+  const artifact = await fs.readFile(path.join(tempDir, "artifacts/readme-headings.txt"), "utf8");
+
+  await assert.rejects(
+    fs.readFile(path.join(tempDir, "outputs/readme-headings.txt"), "utf8"),
+    /ENOENT/,
+  );
+  assert.equal(artifact, "intermediate notes");
+  assert.deepEqual(result.artifacts, ["artifacts/readme-headings.txt"]);
 });
 
 test("OpenAIRunner returns a failed result when the SDK throws", async () => {

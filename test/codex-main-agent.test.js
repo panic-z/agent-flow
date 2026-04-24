@@ -3515,3 +3515,81 @@ test("CodexMainAgent shutdown aborts the in-flight turn", async () => {
   await assert.rejects(pending, /Execution interrupted/);
   assert.equal(abortSeen, true);
 });
+
+test("CodexMainAgent replanning schema supports id 0 as the marker for newly added tasks", async () => {
+  const seenTurnOptions = [];
+  const prompts = [];
+  const agent = new CodexMainAgent({
+    codexClient: {
+      startThread() {
+        return {
+          async run(prompt, turnOptions) {
+            prompts.push(prompt);
+            seenTurnOptions.push(turnOptions);
+            return {
+              finalResponse: JSON.stringify({
+                summary: "Added a preparation step.",
+                pendingTasks: [
+                  {
+                    id: 0,
+                    title: "Prepare appendix",
+                    details: "Prepare appendix",
+                    dependsOn: [1],
+                    onDependencyFailure: "ask_user",
+                    dependencyFailurePrompt: "",
+                  },
+                  {
+                    id: 2,
+                    title: "Publish final deliverable",
+                    details: "Publish final deliverable",
+                    dependsOn: [1],
+                    onDependencyFailure: "ask_user",
+                    dependencyFailurePrompt: "",
+                  },
+                ],
+              }),
+            };
+          },
+        };
+      },
+    },
+  });
+
+  const replan = await agent.replanRemainingTasks({
+    originalInput: "collect source material; publish final deliverable",
+    justCompletedTask: {
+      id: 1,
+      title: "Collect source material",
+      details: "Collect source material",
+      dependsOn: [],
+      status: "success",
+      resultSummary: "done",
+    },
+    completedTasks: [],
+    runningTasks: [],
+    pendingTasks: [
+      {
+        id: 2,
+        title: "Publish final deliverable",
+        details: "Publish final deliverable",
+        dependsOn: [1],
+        status: "pending",
+        resultSummary: "",
+      },
+    ],
+  });
+
+  assert.equal(replan.pendingTasks.length, 2);
+  assert.equal(replan.pendingTasks[0].id, undefined);
+  assert.equal(replan.pendingTasks[1].id, 2);
+  assert.ok(seenTurnOptions[0].outputSchema);
+  assert.equal(
+    seenTurnOptions[0].outputSchema.properties.pendingTasks.items.properties.id.minimum,
+    0,
+  );
+  assert.deepEqual(
+    seenTurnOptions[0].outputSchema.properties.pendingTasks.items.required,
+    ["id", "title", "details", "dependsOn", "onDependencyFailure", "dependencyFailurePrompt"],
+  );
+  assert.match(prompts[0], /For newly added tasks, set id to 0/);
+});

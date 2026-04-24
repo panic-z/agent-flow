@@ -116,7 +116,7 @@ export async function main({
         sessionContext,
         cwd,
       });
-      exitCode = result.exitCode;
+      exitCode = Math.max(exitCode, result.exitCode);
       sessionContext = result.sessionContext ?? sessionContext;
 
       write("\nYou can continue with a follow-up that will inherit the current session context.\n");

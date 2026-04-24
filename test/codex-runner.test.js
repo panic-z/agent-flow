@@ -48,6 +48,51 @@ test("resolveTaskExecutionPlan increases timeout and creates an output directory
   assert.match(plan.relativeArtifactDir, /outputs\/task-2$/);
 });
 
+test("resolveTaskExecutionPlan detects explicit output paths", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-codex-path-"));
+  const plan = await resolveTaskExecutionPlan({
+    cwd: tempDir,
+    baseTimeoutMs: 5_000,
+    task: {
+      id: 3,
+      title: "Save headings result",
+      details: "save the result to outputs/readme-headings.txt",
+    },
+  });
+
+  assert.equal(plan.preferredOutputPath, "outputs/readme-headings.txt");
+});
+
+test("resolveTaskExecutionPlan detects follow-up output paths without save/write verbs", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-codex-followup-path-"));
+  const plan = await resolveTaskExecutionPlan({
+    cwd: tempDir,
+    baseTimeoutMs: 5_000,
+    task: {
+      id: 4,
+      title: "Append exact second line to follow-up file",
+      details: "append a second line containing exactly: second round ok, to outputs/e2e-real-cli-followup.txt",
+    },
+  });
+
+  assert.equal(plan.preferredOutputPath, "outputs/e2e-real-cli-followup.txt");
+});
+
+test("resolveTaskExecutionPlan does not treat read-only referenced output paths as write targets", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-flow-codex-read-path-"));
+  const plan = await resolveTaskExecutionPlan({
+    cwd: tempDir,
+    baseTimeoutMs: 5_000,
+    task: {
+      id: 5,
+      title: "Summarize previous output file",
+      details: "read outputs/source-notes.txt and summarize the important points",
+    },
+  });
+
+  assert.equal(plan.preferredOutputPath, null);
+});
+
 test("inferExecutionHints detects research and artifact requirements", () => {
   const hints = inferExecutionHints({
     title: "全网搜集热门的harness框架",
@@ -107,6 +152,60 @@ test("CodexRunner uses the Codex SDK thread with structured output", async () =>
   assert.match(seen[1].prompt, /outputs\/task-0\/input.md/);
   assert.ok(seen[1].turnOptions.outputSchema);
   assert.ok(seen[1].turnOptions.signal);
+});
+
+test("CodexRunner prompts child agents to use explicit output paths before task artifact directories", async () => {
+  const seen = [];
+  const runner = new CodexRunner({
+    codexClient: {
+      startThread() {
+        return {
+          async run(prompt, turnOptions) {
+            seen.push({ prompt, turnOptions });
+            return {
+              finalResponse: '{"status":"success","summary":"saved","artifacts":["outputs/readme-headings.txt"]}',
+            };
+          },
+        };
+      },
+    },
+  });
+
+  await runner.runTask({
+    id: 3,
+    title: "Save headings result",
+    details: "save the result to outputs/readme-headings.txt",
+  });
+
+  assert.match(seen[0].prompt, /write the final file to exactly this relative path: outputs\/readme-headings\.txt/);
+  assert.match(seen[0].prompt, /Use outputs\/task-3 only for extra intermediate artifacts/);
+});
+
+test("CodexRunner prompts append tasks to avoid extra blank lines", async () => {
+  const seen = [];
+  const runner = new CodexRunner({
+    codexClient: {
+      startThread() {
+        return {
+          async run(prompt, turnOptions) {
+            seen.push({ prompt, turnOptions });
+            return {
+              finalResponse: '{"status":"success","summary":"appended","artifacts":["outputs/e2e.txt"]}',
+            };
+          },
+        };
+      },
+    },
+  });
+
+  await runner.runTask({
+    id: 4,
+    title: "Append exact second line to the file",
+    details: "append a second line containing exactly: second line, to outputs/e2e.txt",
+  });
+
+  assert.match(seen[0].prompt, /When appending text to an existing file/);
+  assert.match(seen[0].prompt, /do not create extra blank lines/);
 });
 
 test("CodexRunner returns a failed result when the SDK throws", async () => {
