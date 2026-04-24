@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output, stderr } from "node:process";
 import { execFile as execFileCallback } from "node:child_process";

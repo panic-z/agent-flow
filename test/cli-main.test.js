@@ -1,10 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 
 import { assertCodexAvailable, assertOpenAIConfig, createMainAgentFromEnv, createRunnerFromEnv, main } from "../src/cli.js";
 import { CodexRunner } from "../src/runners/codex-runner.js";
 import { FakeRunner } from "../src/runners/fake-runner.js";
 import { OpenAIRunner } from "../src/runners/openai-runner.js";
+
+test("package exposes agent-flow as an executable CLI bin", async () => {
+  const packageJson = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const cliSource = await fs.readFile(new URL("../src/cli.js", import.meta.url), "utf8");
+
+  assert.deepEqual(packageJson.bin, {
+    "agent-flow": "./src/cli.js",
+  });
+  assert.deepEqual(packageJson.files, ["src", "README.md", "README.zh-CN.md"]);
+  assert.match(cliSource, /^#!\/usr\/bin\/env node\n/);
+});
 
 test("createRunnerFromEnv returns fake runner in test mode", async () => {
   const runner = await createRunnerFromEnv({
